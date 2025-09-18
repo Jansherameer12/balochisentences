@@ -1,0 +1,5 @@
+streamlit
+pandas
+pymongo
+streamlit-authenticator
+passlib[bcrypt]
