@@ -1,12 +1,3 @@
-# app_streamlit.py
-# Streamlit app for collecting Balochi sentences with MongoDB
-# Features:
-# - Guest contributions (limited per session)
-# - User registration & login using streamlit-authenticator
-# - Contributions are stored in MongoDB (users + sentences collections)
-# - Leaderboard of top contributors
-# - Admin export (download CSV/Excel) and moderation (approve/reject)
-
 import streamlit as st
 import pandas as pd
 from datetime import datetime
@@ -19,54 +10,39 @@ MONGO_URI = st.secrets["MONGO_URI"]
 DB_NAME = "balochi_db"
 
 COOKIE_NAME = "balochi_app"
-COOKIE_KEY = "balochi_secret_key_123"   # change in production
+COOKIE_KEY = "balochi_secret_key_123"
 COOKIE_EXP_DAYS = 30
 
-# -------------------- Helper: Robust password hashing --------------------
+
+# -------------------- Password Hashing --------------------
 def hash_passwords(passwords):
-    """
-    Return a list of hashed passwords for the input list `passwords`.
-    This function tries multiple ways to hash to be compatible with various
-    streamlit-authenticator versions. If the library's Hasher isn't usable,
-    it falls back to passlib bcrypt.
-    """
-    # try different Hasher locations / APIs
     HasherCls = None
     try:
-        # try direct attribute from imported module
         HasherCls = getattr(stauth, "Hasher", None)
     except Exception:
         HasherCls = None
 
     if HasherCls is None:
         try:
-            # try import from utilities module path
             from streamlit_authenticator.utilities.hasher import Hasher as HasherCls  # type: ignore
         except Exception:
             HasherCls = None
 
     if HasherCls is not None:
-        # 1) try classmethod generate
         if hasattr(HasherCls, "generate"):
             try:
-                # try calling as classmethod
                 res = HasherCls.generate(passwords)  # type: ignore
                 if isinstance(res, list):
                     return res
-            except TypeError:
-                # fallback: try creating instance
+            except Exception:
                 try:
                     instance = HasherCls(passwords)  # type: ignore
                     if hasattr(instance, "generate"):
-                        res = instance.generate()  # type: ignore
+                        res = instance.generate()
                         if isinstance(res, list):
                             return res
                 except Exception:
                     pass
-            except Exception:
-                pass
-
-        # 2) try hash_list
         if hasattr(HasherCls, "hash_list"):
             try:
                 res = HasherCls.hash_list(passwords)  # type: ignore
@@ -74,23 +50,16 @@ def hash_passwords(passwords):
                     return res
             except Exception:
                 pass
-
-        # 3) try hash (single) or hash_passwords
         if hasattr(HasherCls, "hash"):
             try:
                 return [HasherCls.hash(p) for p in passwords]  # type: ignore
             except Exception:
                 pass
 
-        # 4) try hash_passwords (may expect a credentials dict; skip)
-        # 5) no usable method found, fall through to passlib
-
-    # fallback: use passlib bcrypt (ensure passlib[bcrypt] is installed)
     try:
-        from passlib.hash import bcrypt  # type: ignore
+        from passlib.hash import bcrypt
         return [bcrypt.hash(p) for p in passwords]
     except Exception:
-        # final fallback: use pbkdf2_hmac via hashlib (less ideal but works)
         import hashlib, os, binascii
         def pbkdf2_hash(pw: str) -> str:
             salt = os.urandom(16)
@@ -99,7 +68,7 @@ def hash_passwords(passwords):
         return [pbkdf2_hash(p) for p in passwords]
 
 
-# -------------------- Database helpers --------------------
+# -------------------- Database --------------------
 def get_db():
     client = MongoClient(MONGO_URI)
     return client[DB_NAME]
@@ -113,7 +82,6 @@ def get_users_df():
                                      "password_hash": 1, "contributions_count": 1,
                                      "is_admin": 1}))
     if len(users) == 0:
-        # return empty dataframe with expected columns to avoid KeyErrors
         return pd.DataFrame(columns=["_id","name","username","password_hash","contributions_count","is_admin"])
     return pd.DataFrame(users)
 
@@ -142,7 +110,6 @@ def add_sentence(user_id, sentence, label, approved=0):
         try:
             users_col.update_one({"_id": ObjectId(user_id)}, {"$inc": {"contributions_count": 1}})
         except Exception:
-            # if user_id is not a valid ObjectId, ignore
             pass
 
 def get_sentences(only_approved=True, limit=100):
@@ -150,7 +117,6 @@ def get_sentences(only_approved=True, limit=100):
     if only_approved:
         q["approved"] = 1
     docs = list(sent_col.find(q).sort("_id", -1).limit(limit))
-    # Join usernames
     for d in docs:
         if d.get("user_id"):
             try:
@@ -176,28 +142,24 @@ def export_data():
     df_sent = pd.DataFrame(list(sent_col.find()))
     return df_users, df_sent
 
-# -------------------- Authentication helpers --------------------
+
+# -------------------- Authentication --------------------
 def build_authenticator():
     users_df = get_users_df()
-
-    # If no users exist, create default admin
     if users_df.shape[0] == 0:
         default_pass = "admin123"
         hashed = hash_passwords([default_pass])[0]
         add_user("Admin", "admin", hashed, is_admin=1)
         users_df = get_users_df()
 
-    # Build credentials dict required by streamlit-authenticator
     credentials = {"usernames": {}}
     for _, row in users_df.iterrows():
-        # ensure we have a valid hashed password in DB; field name 'password_hash'
-        pw = row.get("password_hash", None) if isinstance(row, dict) else row["password_hash"]
+        pw = row["password_hash"]
         credentials["usernames"][row["username"]] = {
-            "name": (row["name"] if pd.notna(row["name"]) else row["username"]),
+            "name": row["name"] if pd.notna(row["name"]) else row["username"],
             "password": pw
         }
 
-    # Important: passwords stored in DB are already hashed, so disable auto_hash
     authenticator = stauth.Authenticate(
         credentials,
         COOKIE_NAME,
@@ -207,30 +169,26 @@ def build_authenticator():
     )
     return authenticator, users_df
 
-# -------------------- App UI --------------------
+
+# -------------------- App --------------------
 st.set_page_config(page_title="Balochi Sentence Collector", layout="centered")
 authenticator, users_df = build_authenticator()
 
 st.title("Balochi Sentence Collection")
-st.write("Contribute Balochi sentences to build a sentiment dataset. You can contribute as a guest or create/login to track your contributions.")
+st.write("Contribute Balochi sentences to build a sentiment dataset. You can contribute as a guest or login/register to track your contributions.")
 
-# Sidebar
 with st.sidebar:
     st.header("Account")
     choice = st.radio("Choose", ["Continue as Guest", "Login", "Register"])
 
     if choice == "Login":
-        # Handle both old and new authenticator API styles
         login_result = authenticator.login(location="main")
-
         if login_result is not None:
-            # old API: tuple unpacking
             try:
                 name, authentication_status, username = login_result
             except Exception:
                 name, authentication_status, username = None, None, None
         else:
-            # new API: values stored in session_state
             name = st.session_state.get("name")
             username = st.session_state.get("username")
             authentication_status = st.session_state.get("authentication_status")
@@ -238,7 +196,6 @@ with st.sidebar:
         if authentication_status:
             st.success(f"Welcome *{name}*")
             user_row = users_df[users_df["username"] == username]
-            # convert ObjectId to str
             user_id = str(user_row["_id"].values[0])
             is_admin = int(user_row["is_admin"].values[0])
             st.session_state["user"] = {
@@ -259,22 +216,19 @@ with st.sidebar:
             if not reg_name or not reg_username or not reg_password:
                 st.error("Please fill all fields")
             else:
-                # create hashed password in a robust way
                 hashed = hash_passwords([reg_password])[0]
                 ok = add_user(reg_name, reg_username, hashed, is_admin=0)
                 if ok:
                     st.success("Account created. Please go to Login.")
                 else:
                     st.error("Username already exists")
-
     else:
-        st.info("You can contribute as a guest. Register to track contributions and appear on the leaderboard.")
+        st.info("You can contribute as a guest. Register to appear on the leaderboard.")
 
-# Guest submission counter
+
 if "guest_submissions" not in st.session_state:
     st.session_state["guest_submissions"] = 0
 
-# Contribution form
 st.subheader("Contribute a sentence")
 with st.form("contribute"):
     sentence = st.text_area("Write a Balochi sentence", max_chars=300)
@@ -282,21 +236,17 @@ with st.form("contribute"):
     submitted = st.form_submit_button("Submit")
 
 if submitted:
-    if "user" in st.session_state:
-        uid = st.session_state["user"]["id"]
-    else:
-        uid = None
-
+    uid = st.session_state["user"]["id"] if "user" in st.session_state else None
     if uid is None:
         if st.session_state["guest_submissions"] >= 10:
-            st.warning("Guest submission limit reached. Please register for unlimited contributions.")
+            st.warning("Guest submission limit reached. Please register.")
         else:
             add_sentence(None, sentence, label, approved=0)
             st.session_state["guest_submissions"] += 1
-            st.success("Thank you! Your sentence has been submitted (awaiting approval).")
+            st.success("Submitted! Awaiting approval.")
     else:
         add_sentence(uid, sentence, label, approved=1)
-        st.success("Thanks — your sentence has been submitted and approved!")
+        st.success("Submitted and approved!")
         users_df = get_users_df()
         try:
             updated = users_df[users_df["_id"] == ObjectId(uid)]
@@ -304,13 +254,8 @@ if submitted:
                 st.session_state["user"]["contributions"] = int(updated["contributions_count"].values[0])
         except Exception:
             pass
-
-    # ✅ Clear fields & force refresh
-    st.session_state["sentence_input"] = ""
-    st.session_state["label_input"] = "positive"
     st.rerun()
 
-# Show sentences
 st.subheader("Recent approved sentences")
 recent = get_sentences(only_approved=True, limit=50)
 if recent.shape[0] == 0:
@@ -319,7 +264,6 @@ else:
     for _, row in recent.iterrows():
         st.markdown(f"**{row['username']}** — {row['label']}  \n> {row['sentence']}")
 
-# Leaderboard
 st.subheader("Leaderboard — Top contributors")
 leader = get_leaderboard(limit=20)
 if leader.shape[0] == 0:
@@ -327,7 +271,6 @@ if leader.shape[0] == 0:
 else:
     st.table(leader[["username", "contributions_count"]])
 
-# Admin panel
 if "user" in st.session_state and st.session_state["user"].get("is_admin"):
     st.markdown("---")
     st.subheader("Admin panel")
@@ -355,5 +298,4 @@ if "user" in st.session_state and st.session_state["user"].get("is_admin"):
             st.download_button("Download Excel", f, file_name=out_path)
 
 st.markdown("---")
-# st.caption("Thank you for contributing to the Balochi language resources!")
-st.caption("© 2025 Balochi Sentence Collector | Thank you for contributing to the Balochi language resources!")
+st.caption("© 2025 Balochi Sentence Collector")
